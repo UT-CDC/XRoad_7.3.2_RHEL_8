@@ -1,0 +1,66 @@
+# Dispara en cualquier rama y en tags
+trigger:
+  branches:
+    include: ['*']
+  tags:
+    include: ['*']
+
+# Sincronización de seguridad (por si algo se escapó)
+schedules:
+- cron: "0 6 * * *"
+  displayName: "Daily mirror to GitHub"
+  branches:
+    include: ['*']
+  always: true
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# Trae las credenciales desde el Variable Group de ADO
+variables:
+- group: github-mirror
+
+
+steps:
+- checkout: self
+  fetchDepth: 0  # full history para mirror completo
+
+- script: |
+    set -e
+
+    echo "Configurando git…"
+    git config --global user.name  "ado-mirror-bot"
+    git config --global user.email "ado-mirror-bot@example.local"
+    git config --global --add safe.directory "$(Build.SourcesDirectory)"
+
+    echo "Instalando git-lfs (si aplica)…"
+    if ! command -v git-lfs >/dev/null 2>&1; then
+      sudo apt-get update -y
+      sudo apt-get install -y git-lfs
+      git lfs install
+    fi
+
+    echo "Preparando remoto de GitHub…"
+    TARGET_REPO="$(Build.Repository.Name)"   # usamos el mismo nombre del repo ADO
+    echo "Destino: https://github.com/$(GITHUB_OWNER)/$TARGET_REPO.git"
+
+    # Limpia remoto previo si existe
+    git remote remove github 2>/dev/null || true
+    git remote add github "https://$(GITHUB_USER):$(GITHUB_PAT)@github.com/$(GITHUB_OWNER)/${TARGET_REPO}.git"
+
+    echo "Fetch de todas las refs/tags del origen ADO…"
+    git fetch --all --tags --prune
+
+    echo "Mirror (ramas, tags, notas, refs)…"
+    git push --mirror github
+
+    echo "Empuje de objetos LFS (si existieran)…"
+    git lfs fetch --all || true
+    git lfs push --all github || true
+
+    echo "Mirror completado hacia GitHub: $(GITHUB_OWNER)/$TARGET_REPO"
+  displayName: "Mirror ADO → GitHub (branches, tags, LFS)"
+  env:
+    GITHUB_USER: $(GITHUB_USER)
+    GITHUB_PAT:  $(GITHUB_PAT)
+    GITHUB_OWNER: $(GITHUB_OWNER)
