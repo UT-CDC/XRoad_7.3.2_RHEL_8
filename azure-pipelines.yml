@@ -1,5 +1,4 @@
-# azure-pipelines.yml
-# Mirror unidireccional: Azure DevOps → GitHub (ramas + tags + LFS) para cuenta personal
+# Mirror de código ADO → GitHub y publicación de binarios como Release assets (descarga sin cuota)
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
@@ -7,7 +6,7 @@ trigger:
   tags:     { include: ['*'] }
 
 schedules:
-- cron: "0 6 * * *"           # 06:00 UTC diario (opcional)
+- cron: "0 6 * * *"    # opcional: espejo diario 06:00 UTC
   displayName: "Daily mirror to GitHub"
   branches: { include: ['*'] }
   always: true
@@ -15,66 +14,131 @@ schedules:
 pool:
   vmImage: 'ubuntu-latest'
 
+# Ajusta los patrones de binarios a mover a Releases (los que superan 100 MB en GitHub)
+variables:
+  BIN_PATTERNS: 'rhel.zip,*.zip,*.tar.gz,*.7z,*.tgz'
+
 steps:
 - checkout: self
-  persistCredentials: true       # usa System.AccessToken para leer de ADO
-  fetchDepth: 0                  # historia completa
+  persistCredentials: true
+  fetchDepth: 0
 
 - script: |
     set -euo pipefail
 
-    # -------- Prechecks & defaults --------
+    # --- Prechecks ---
     if [ -z "${GITHUB_USER:-}" ] || [ -z "${GITHUB_PAT:-}" ]; then
-      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (defínelas en Variables; PAT como secret)."
+      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define variables; PAT como secret)."
       exit 1
     fi
-    # Owner = tu mismo usuario (cuenta personal)
     OWNER="${GITHUB_OWNER:-$GITHUB_USER}"
 
-    echo "Config git"
+    echo "Instalando utilidades..."
+    sudo apt-get update -y
+    sudo apt-get install -y git-lfs jq python3-pip
+    git lfs install
+    python3 -m pip install --user git-filter-repo
+    export PATH="$HOME/.local/bin:$PATH"
+
+    echo "Configurando git..."
     git config --global user.name  "ado-mirror-bot"
     git config --global user.email "ado-mirror-bot@example.local"
     git config --global --add safe.directory "$BUILD_SOURCESDIRECTORY"
 
-    echo "Instalar git-lfs (si aplica)…"
-    if ! command -v git-lfs >/dev/null 2>&1; then
-      sudo apt-get update -y
-      sudo apt-get install -y git-lfs
-      git lfs install
+    TARGET_REPO="$BUILD_REPOSITORY_NAME"
+    SRC_URI="$BUILD_REPOSITORY_URI"
+    BRANCH="${BUILD_SOURCEBRANCHNAME:-main}"
+    SHORT_SHA="${BUILD_SOURCEVERSION:0:7}"
+    TAG="mirror-${BRANCH}-${SHORT_SHA}"
+    RELEASE_TITLE="Mirror ${BRANCH}@${SHORT_SHA} (desde Azure DevOps)"
+    RELEASE_NOTES="Release generada automáticamente desde Azure DevOps. Incluye binarios como assets."
+
+    echo "Repositorio ADO: $SRC_URI"
+    echo "Repositorio GitHub: https://github.com/$OWNER/$TARGET_REPO.git"
+
+    # 1) Localizar binarios grandes en el checkout y guardarlos para la Release
+    echo "Localizando binarios a empaquetar como assets..."
+    IFS=',' read -ra PATS <<< "$BIN_PATTERNS"
+    mkdir -p _assets
+    found_any=false
+    for pat in "${PATS[@]}"; do
+      while IFS= read -r -d '' f; do
+        found_any=true
+        echo "   -> $f"
+        cp -f --parents "$f" _assets/ || cp -f "$f" _assets/ 2>/dev/null || true
+      done < <(find "$BUILD_SOURCESDIRECTORY" -type f -name "$pat" -size +100M -print0 2>/dev/null || true)
+    done
+    if [ "$found_any" = false ]; then
+      echo "No se detectaron binarios >100MB por patrones: $BIN_PATTERNS"
     fi
 
-    TARGET_REPO="$BUILD_REPOSITORY_NAME"
-    echo "Repo ADO:    $BUILD_REPOSITORY_URI"
-    echo "Repo GitHub: https://github.com/$OWNER/$TARGET_REPO.git"
+    # 2) Reescribir la copia que vamos a empujar a GitHub para excluir binarios del árbol Git
+    echo "Reescribiendo historia local para excluir binarios del PUSH (sin tocar ADO)..."
+    # Eliminamos del historial todo lo que coincida con los patrones (en todas las ramas y tags)
+    FILTER_ARGS=()
+    for pat in "${PATS[@]}"; do
+      FILTER_ARGS+=( --path-glob "$pat" )
+    done
+    git filter-repo --force --invert-paths "${FILTER_ARGS[@]}"
 
-    echo "Config remoto GitHub con token…"
+    # 3) Empujar código a GitHub (mirror de ramas y tags, ya sin archivos >100MB)
+    echo "Empujando código a GitHub..."
     git remote remove github 2>/dev/null || true
-    git remote add github "https://$GITHUB_USER:$GITHUB_PAT@github.com/$OWNER/$TARGET_REPO.git"
+    git remote add github "https://${GITHUB_USER}:${GITHUB_PAT}@github.com/${OWNER}/${TARGET_REPO}.git"
+    git fetch origin --prune --tags || true  # por si necesitas refs de ADO para mapear
+    git push github --all --force
+    git push github --tags --force
 
-    echo "Verificando acceso a GitHub (ls-remote)…"
-    if ! git ls-remote github &>/dev/null; then
-      echo "ERROR: Sin acceso al repo GitHub ($OWNER/$TARGET_REPO)."
-      echo "  - Asegúrate de que $GITHUB_USER es el dueño (tu cuenta) o tiene Write."
-      echo "  - PAT válido con 'repo' (o Contents: Read/Write)."
+    # 4) Crear/actualizar Release y subir assets (descargas sin cuota de bandwidth)
+    API="https://api.github.com/repos/${OWNER}/${TARGET_REPO}"
+    UPLOADS="https://uploads.github.com/repos/${OWNER}/${TARGET_REPO}"
+
+    echo "Creando/obteniendo Release con tag: $TAG"
+    # ¿Existe la release?
+    set +e
+    rel_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "$API/releases/tags/$TAG")
+    set -e
+    if echo "$rel_json" | jq -e '.id' >/dev/null 2>&1; then
+      rel_id=$(echo "$rel_json" | jq -r '.id')
+    else
+      # Crear release (crea tag si no existe)
+      payload=$(jq -n --arg tag "$TAG" --arg target "$BRANCH" --arg name "$RELEASE_TITLE" --arg body "$RELEASE_NOTES" \
+        '{ tag_name: $tag, target_commitish: $target, name: $name, body: $body, draft: false, prerelease: false }')
+      rel_json=$(curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" -H "Content-Type: application/json" \
+        -d "$payload" "$API/releases")
+      rel_id=$(echo "$rel_json" | jq -r '.id')
+    fi
+    if [ -z "$rel_id" ] || [ "$rel_id" = "null" ]; then
+      echo "ERROR: No se pudo crear/obtener la Release."
+      echo "$rel_json"
       exit 1
     fi
 
-    echo "Fetch desde origin (ADO)…"
-    git fetch origin --prune --tags
+    if [ -d "_assets" ]; then
+      echo "Subiendo assets a la Release (sin límite de ancho de banda en descargas)..."
+      shopt -s globstar nullglob
+      for f in _assets/**/* _assets/*; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f")"
+        echo "   -> $name"
+        # Si existe un asset con el mismo nombre, eliminarlo antes (evita duplicados)
+        assets_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "$API/releases/$rel_id/assets")
+        asset_id=$(echo "$assets_json" | jq -r ".[] | select(.name==\"$name\") | .id" || true)
+        if [ -n "${asset_id:-}" ] && [ "$asset_id" != "null" ]; then
+          curl -sS -X DELETE -H "Authorization: token ${GITHUB_PAT}" "$API/releases/assets/$asset_id" >/dev/null || true
+        fi
+        curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" \
+          -H "Content-Type: application/octet-stream" \
+          --data-binary @"$f" \
+          "$UPLOADS/releases/$rel_id/assets?name=$name" >/dev/null
+      done
+    else
+      echo "No hay assets para subir (carpeta _assets vacía)."
+    fi
 
-    echo "Push ramas (origin/* → heads/*) con prune y force…"
-    git push github +refs/remotes/origin/*:refs/heads/* --prune
-
-    echo "Push tags con prune…"
-    git push github --tags --prune
-
-    echo "Empuje LFS (si existiera)…"
-    git lfs fetch --all || true
-    git lfs push --all github || true
-
-    echo "✅ Mirror completado: $OWNER/$TARGET_REPO"
-  displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
+    echo "Mirror completado. Código en github.com/${OWNER}/${TARGET_REPO} y binarios como assets en la Release ${TAG}."
+  displayName: "Mirror ADO → GitHub (código) + Release assets (binarios)"
   env:
-    GITHUB_USER: $(GITHUB_USER)   # defínelas en la UI del pipeline
+    GITHUB_USER: $(GITHUB_USER)
     GITHUB_PAT:  $(GITHUB_PAT)
-    # GITHUB_OWNER: (opcional) si lo pones, debe ser igual a tu GITHUB_USER
+    GITHUB_OWNER: $(GITHUB_OWNER)
