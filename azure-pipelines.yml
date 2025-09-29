@@ -1,4 +1,3 @@
-# Mirror ADO → GitHub (código) + Release assets (binarios), sin usar LFS ni cuota de ancho de banda
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
@@ -14,7 +13,7 @@ schedules:
 pool:
   vmImage: 'ubuntu-latest'
 
-# Ajusta a lo que consideres "binario grande" que debe salir del árbol Git y subirse como asset
+# Ajusta patrones de binarios a mover a Release (los que exceden 100MB en GitHub)
 variables:
   BIN_PATTERNS: 'rhel.zip,*.zip,*.tar.gz,*.7z,*.tgz'
 
@@ -28,7 +27,7 @@ steps:
 
     # --- Prechecks ---
     if [ -z "${GITHUB_USER:-}" ] || [ -z "${GITHUB_PAT:-}" ]; then
-      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (defínelas; PAT como secret)."
+      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define variables; PAT como secret)."
       exit 1
     fi
     OWNER="${GITHUB_OWNER:-$GITHUB_USER}"
@@ -52,9 +51,9 @@ steps:
     RELEASE_TITLE="Mirror ${BRANCH}@${SHORT_SHA} (desde Azure DevOps)"
     RELEASE_NOTES="Release generada automáticamente desde Azure DevOps. Binarios como assets (descarga sin cuota)."
 
-    GH_URL_NOPASS="https://github.com/$OWNER/$TARGET_REPO.git"
-    GH_API="https://api.github.com/repos/$OWNER/$TARGET_REPO"
-    GH_UPLOADS="https://uploads.github.com/repos/$OWNER/$TARGET_REPO"
+    GH_URL_NOPASS="https://github.com/${OWNER}/${TARGET_REPO}.git"
+    GH_API="https://api.github.com/repos/${OWNER}/${TARGET_REPO}"
+    GH_UPLOADS="https://uploads.github.com/repos/${OWNER}/${TARGET_REPO}"
 
     echo "Repositorio ADO:  $SRC_URI"
     echo "Repositorio GitHub: $GH_URL_NOPASS"
@@ -73,41 +72,56 @@ steps:
         done; } | sort -zu
     )
 
-    # 2) Reescribir SOLO la copia a empujar (excluir binarios del árbol Git)
+    # 2) Crear ramas locales desde origin/* (antes de reescribir) para preservar refs
+    if git show-ref --quiet; then
+      if git show-ref --quiet "refs/remotes/origin/HEAD"; then
+        true # nada
+      fi
+      for r in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin/HEAD$' || true); do
+        br="${r#origin/}"
+        git branch -f "$br" "origin/$br" || true
+      done
+    fi
+
+    # 3) Reescribir SOLO la copia a empujar (excluir binarios del árbol Git)
     if [ -n "$(ls -A _assets 2>/dev/null || true)" ]; then
       echo "Reescribiendo historia local para excluir binarios del PUSH..."
       FILTER_ARGS=()
       for pat in "${PATS[@]}"; do FILTER_ARGS+=( --path-glob "$pat" ); done
-      git-filter-repo --force --invert-paths "${FILTER_ARGS[@]}"
-      # Nota: git-filter-repo eliminará 'origin' (esperado). Después ya no usamos origin.
+      git filter-repo --force --invert-paths "${FILTER_ARGS[@]}"
+      # Nota: git filter-repo elimina el remoto 'origin' (esperado). Ya no lo usamos.
     else
       echo "No se detectaron binarios >100MB (patrones: $BIN_PATTERNS)"
     fi
 
-    # 3) Empujar código a GitHub (crear repo si no existe)
+    # 4) Empujar código a GitHub (crear repo si no existe y asegurar que sea público)
     echo "Preparando remoto GitHub..."
     git remote remove github 2>/dev/null || true
     GH_URL="https://${GITHUB_USER}:${GITHUB_PAT}@github.com/${OWNER}/${TARGET_REPO}.git"
     git remote add github "$GH_URL"
 
     # Crear repo si no existe
-    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PAT" "$GH_API")
-    if [ "$STATUS" -eq 404 ]; then
-      echo "Repo no existe en GitHub; creándolo bajo $OWNER/$TARGET_REPO ..."
-      if [ "$OWNER" = "$GITHUB_USER" ]; then
-        curl -sS -X POST -H "Authorization: token $GITHUB_PAT" -H "Content-Type: application/json" \
-          -d "{\"name\":\"$TARGET_REPO\",\"private\":false}" \
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: token ${GITHUB_PAT}" "${GH_API}")
+    if [ "${STATUS}" -eq 404 ]; then
+      echo "Repo no existe en GitHub; creándolo bajo ${OWNER}/${TARGET_REPO} ..."
+      if [ "${OWNER}" = "${GITHUB_USER}" ]; then
+        curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" -H "Content-Type: application/json" \
+          -d "{\"name\":\"${TARGET_REPO}\",\"private\":false}" \
           https://api.github.com/user/repos >/dev/null
       else
-        curl -sS -X POST -H "Authorization: token $GITHUB_PAT" -H "Content-Type: application/json" \
-          -d "{\"name\":\"$TARGET_REPO\",\"private\":false}" \
-          "https://api.github.com/orgs/$OWNER/repos" >/dev/null
+        curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" -H "Content-Type: application/json" \
+          -d "{\"name\":\"${TARGET_REPO}\",\"private\":false}" \
+          "https://api.github.com/orgs/${OWNER}/repos" >/dev/null
       fi
     fi
 
+    # Asegurar que el repo es público (si tu PAT tiene permisos de admin)
+    curl -sS -X PATCH -H "Authorization: token ${GITHUB_PAT}" -H "Content-Type: application/json" \
+      -d '{"private": false}' "${GH_API}" >/dev/null || true
+
     # Verificar acceso al remoto (sin mostrar PAT)
     if ! git ls-remote github >/dev/null; then
-      echo "ERROR: No hay acceso al repo $GH_URL_NOPASS"
+      echo "ERROR: No hay acceso al repo ${GH_URL_NOPASS}"
       exit 1
     fi
 
@@ -115,17 +129,17 @@ steps:
     git push github --all --force
     git push github --tags --force
 
-    # 4) Crear/actualizar Release y subir assets (descarga sin cuota)
+    # 5) Crear/actualizar Release y subir assets (descarga sin cuota)
     if [ -d "_assets" ] && [ -n "$(ls -A _assets || true)" ]; then
-      echo "Creando/obteniendo Release con tag: $TAG"
+      echo "Creando/obteniendo Release con tag: ${TAG}"
       set +e
-      rel_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "$GH_API/releases/tags/$TAG")
+      rel_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "${GH_API}/releases/tags/${TAG}")
       set -e
       if ! echo "$rel_json" | jq -e '.id' >/dev/null 2>&1; then
         payload=$(jq -n --arg tag "$TAG" --arg target "$BRANCH" --arg name "$RELEASE_TITLE" --arg body "$RELEASE_NOTES" \
           '{ tag_name: $tag, target_commitish: $target, name: $name, body: $body, draft: false, prerelease: false }')
         rel_json=$(curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" -H "Content-Type: application/json" \
-          -d "$payload" "$GH_API/releases")
+          -d "$payload" "${GH_API}/releases")
       fi
       rel_id=$(echo "$rel_json" | jq -r '.id')
       if [ -z "$rel_id" ] || [ "$rel_id" = "null" ]; then
@@ -139,24 +153,24 @@ steps:
         [ -f "$f" ] || continue
         name="$(basename "$f")"
         # Eliminar asset previo con el mismo nombre (si existe)
-        assets_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "$GH_API/releases/$rel_id/assets")
+        assets_json=$(curl -sS -H "Authorization: token ${GITHUB_PAT}" "${GH_API}/releases/${rel_id}/assets")
         asset_id=$(echo "$assets_json" | jq -r ".[] | select(.name==\"$name\") | .id" || true)
         if [ -n "${asset_id:-}" ] && [ "$asset_id" != "null" ]; then
-          curl -sS -X DELETE -H "Authorization: token ${GITHUB_PAT}" "$GH_API/releases/assets/$asset_id" >/dev/null || true
+          curl -sS -X DELETE -H "Authorization: token ${GITHUB_PAT}" "${GH_API}/releases/assets/${asset_id}" >/dev/null || true
         fi
         curl -sS -X POST -H "Authorization: token ${GITHUB_PAT}" \
           -H "Content-Type: application/octet-stream" \
           --data-binary @"$f" \
-          "$GH_UPLOADS/releases/$rel_id/assets?name=$name" >/dev/null
+          "${GH_UPLOADS}/releases/${rel_id}/assets?name=${name}" >/dev/null
         echo "   asset subido: $name"
       done
     else
       echo "Sin assets para Release."
     fi
 
-    echo "Mirror completado. Código en $GH_URL_NOPASS y binarios como assets en la Release $TAG."
+    echo "Mirror completado. Código en ${GH_URL_NOPASS} y binarios como assets en la Release ${TAG}."
   displayName: "Mirror ADO → GitHub (código) + Release assets (binarios)"
   env:
     GITHUB_USER: $(GITHUB_USER)
     GITHUB_PAT:  $(GITHUB_PAT)
-    GITHUB_OWNER: $(GITHUB_OWNER)
+    GITHUB_OWNER: $(GITHUB_OWNER)   # opcional; si no lo defines, usa GITHUB_USER
