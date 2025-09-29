@@ -1,31 +1,42 @@
+# azure-pipelines.yml
+# Mirror unidireccional: Azure DevOps → GitHub (ramas + tags + LFS)
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
-  branches:
-    include: ['*']
-  tags:
-    include: ['*']
+  branches: { include: ['*'] }
+  tags:     { include: ['*'] }
 
 schedules:
-- cron: "0 6 * * *"          
+- cron: "0 6 * * *"           # 06:00 UTC diario (opcional)
   displayName: "Daily mirror to GitHub"
-  branches:
-    include: ['*']
+  branches: { include: ['*'] }
   always: true
 
 pool:
   vmImage: 'ubuntu-latest'
 
-variables:
-  GITHUB_OWNER: 'UT-CDC'     
+# Variables del pipeline (UI):
+#   GITHUB_USER = tu-usuario (dueño del repo y creador del PAT)
+#   GITHUB_PAT  = PAT de ese usuario (secret)
+#   GITHUB_OWNER = (opcional) si la pones, que sea IGUAL a GITHUB_USER
 
 steps:
 - checkout: self
-  persistCredentials: true    # usa System.AccessToken para leer de ADO
-  fetchDepth: 0               # historia completa
+  persistCredentials: true     # usa System.AccessToken para leer de ADO
+  fetchDepth: 0
 
 - script: |
     set -euo pipefail
+
+    # --- Prechecks & defaults ---
+    if [ -z "${GITHUB_USER:-}" ] || [ -z "${GITHUB_PAT:-}" ]; then
+      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define ambas en Variables; PAT como secret)."
+      exit 1
+    fi
+    # Si no pasan GITHUB_OWNER, úsalo igual a GITHUB_USER (owner = usuario)
+    if [ -z "${GITHUB_OWNER:-}" ]; then
+      GITHUB_OWNER="$GITHUB_USER"
+    fi
 
     echo "Config git"
     git config --global user.name  "ado-mirror-bot"
@@ -47,6 +58,14 @@ steps:
     git remote remove github 2>/dev/null || true
     git remote add github "https://$GITHUB_USER:$GITHUB_PAT@github.com/$GITHUB_OWNER/${TARGET_REPO}.git"
 
+    echo "Verificando acceso a GitHub (ls-remote)…"
+    if ! git ls-remote github &>/dev/null; then
+      echo "ERROR: Sin acceso al repo GitHub ($GITHUB_OWNER/${TARGET_REPO})."
+      echo "  - Verifica que $GITHUB_USER sea el owner o tenga Write."
+      echo "  - PAT válido con 'repo' (o Contents: Read/Write)."
+      exit 1
+    fi
+
     echo "Fetch desde origin (ADO)…"
     git fetch origin --prune --tags
 
@@ -56,12 +75,13 @@ steps:
     echo "Push tags con prune…"
     git push github --tags --prune
 
-    echo "Empuje LFS (si hubiese)…"
+    echo "Empuje LFS (si existiera)…"
     git lfs fetch --all || true
     git lfs push --all github || true
 
     echo "Mirror completado: $GITHUB_OWNER/${TARGET_REPO}"
   displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
   env:
-    GITHUB_USER: $(GITHUB_USER)   # definidas en Variables del pipeline (UI)
+    GITHUB_USER: $(GITHUB_USER)
     GITHUB_PAT:  $(GITHUB_PAT)
+    GITHUB_OWNER: $(GITHUB_OWNER)
