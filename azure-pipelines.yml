@@ -15,22 +15,17 @@ schedules:
 pool:
   vmImage: 'ubuntu-latest'
 
-# Variables en la UI del pipeline:
-#   GITHUB_USER = tu-usuario (dueño del repo y creador del PAT)
-#   GITHUB_PAT  = PAT de ese usuario (secret)
-#   (opcional) GITHUB_OWNER = si no la defines, el script la iguala a GITHUB_USER
-
 steps:
 - checkout: self
   persistCredentials: true     # usa System.AccessToken para leer de ADO
-  fetchDepth: 0
+  fetchDepth: 0                # historia completa
 
 - script: |
     set -euo pipefail
 
     # --- Prechecks & defaults ---
     if [ -z "${GITHUB_USER:-}" ] || [ -z "${GITHUB_PAT:-}" ]; then
-      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define ambas en Variables; PAT como secret)."
+      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define ambas; PAT como secret)."
       exit 1
     fi
     # Si no pasan GITHUB_OWNER, usar el mismo usuario (owner = user)
@@ -50,18 +45,18 @@ steps:
       git lfs install
     fi
 
-    TARGET_REPO="$(Build.Repository.Name)"
-    echo "Repo ADO:    $(Build.Repository Uri)"
-    echo "Repo GitHub: https://github.com/$GITHUB_OWNER/${TARGET_REPO}.git"
+    TARGET_REPO="${BUILD_REPOSITORY_NAME}"
+    echo "Repo ADO:    ${BUILD_REPOSITORY_URI}"
+    echo "Repo GitHub: https://github.com/${GITHUB_OWNER}/${TARGET_REPO}.git"
 
     echo "Config remoto GitHub con token…"
     git remote remove github 2>/dev/null || true
-    git remote add github "https://$GITHUB_USER:$GITHUB_PAT@github.com/$GITHUB_OWNER/${TARGET_REPO}.git"
+    git remote add github "https://${GITHUB_USER}:${GITHUB_PAT}@github.com/${GITHUB_OWNER}/${TARGET_REPO}.git"
 
     echo "Verificando acceso a GitHub (ls-remote)…"
     if ! git ls-remote github &>/dev/null; then
-      echo "ERROR: Sin acceso al repo GitHub ($GITHUB_OWNER/${TARGET_REPO})."
-      echo "  - Verifica que $GITHUB_USER sea el owner o tenga Write."
+      echo "ERROR: Sin acceso al repo GitHub (${GITHUB_OWNER}/${TARGET_REPO})."
+      echo "  - Verifica que ${GITHUB_USER} sea owner o tenga Write."
       echo "  - PAT válido con 'repo' (o Contents: Read/Write) y SSO habilitado si la org lo exige."
       exit 1
     fi
@@ -79,9 +74,9 @@ steps:
     git lfs fetch --all || true
     git lfs push --all github || true
 
-    echo "Mirror completado: $GITHUB_OWNER/${TARGET_REPO}"
+    echo "Mirror completado: ${GITHUB_OWNER}/${TARGET_REPO}"
   displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
   env:
-    GITHUB_USER: $(GITHUB_USER)   # defínelas en la UI del pipeline
+    GITHUB_USER: $(GITHUB_USER)     # defínelas en la UI del pipeline
     GITHUB_PAT:  $(GITHUB_PAT)
-    GITHUB_OWNER: $(GITHUB_OWNER)
+    GITHUB_OWNER: $(GITHUB_OWNER)   # opcional: si no la defines, el script usa GITHUB_USER
