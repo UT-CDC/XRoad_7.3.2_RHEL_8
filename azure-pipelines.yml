@@ -1,67 +1,67 @@
-# azure-pipelines.yml
+name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
-  branches: { include: ['*'] }
-  tags:     { include: ['*'] }
+  branches:
+    include: ['*']
+  tags:
+    include: ['*']
 
 schedules:
-- cron: "0 6 * * *"         
+- cron: "0 6 * * *"          
   displayName: "Daily mirror to GitHub"
-  branches: { include: ['*'] }
+  branches:
+    include: ['*']
   always: true
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-- group: github-mirror      # GITHUB_USER, GITHUB_PAT (secret), GITHUB_OWNER (UT-CDC)
+  GITHUB_OWNER: 'UT-CDC'     
 
 steps:
 - checkout: self
-  persistCredentials: true  
-  fetchDepth: 0           
+  persistCredentials: true    # usa System.AccessToken para leer de ADO
+  fetchDepth: 0               # historia completa
 
 - script: |
-    set -e
+    set -euo pipefail
 
     echo "Config git"
     git config --global user.name  "ado-mirror-bot"
     git config --global user.email "ado-mirror-bot@example.local"
     git config --global --add safe.directory "$(Build.SourcesDirectory)"
 
-    echo "Opcional: git-lfs"
+    echo "Instalar git-lfs (si aplica)…"
     if ! command -v git-lfs >/dev/null 2>&1; then
       sudo apt-get update -y
       sudo apt-get install -y git-lfs
       git lfs install
     fi
 
-    echo "Destino GitHub…"
-    TARGET_REPO="$(Build.Repository.Name)"  # mismo nombre en GitHub
+    TARGET_REPO="$(Build.Repository.Name)"
+    echo "Repo ADO:    $(Build.Repository.Uri)"
+    echo "Repo GitHub: https://github.com/$GITHUB_OWNER/${TARGET_REPO}.git"
+
+    echo "Config remoto GitHub con token…"
     git remote remove github 2>/dev/null || true
-    git remote add github "https://$(GITHUB_USER):$(GITHUB_PAT)@github.com/$(GITHUB_OWNER)/${TARGET_REPO}.git"
+    git remote add github "https://$GITHUB_USER:$GITHUB_PAT@github.com/$GITHUB_OWNER/${TARGET_REPO}.git"
 
-    echo "Fetch solo del origin (ADO)…"
-    # Trae todas las ramas y tags del origin usando el token del checkout
-    git fetch origin --prune --tags +refs/heads/*:refs/remotes/origin/*
+    echo "Fetch desde origin (ADO)…"
+    git fetch origin --prune --tags
 
-    echo "Actualizar refs locales (tracking)"
-    # Asegurar refs locales para mirror. Opcional si solo trabajas con remotes/origin/*
-    for r in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/); do
-      br="${r#origin/}"
-      git update-ref "refs/heads/$br" "refs/remotes/$r" || true
-    done
+    echo "Push ramas (origin/* → heads/*) con prune y force…"
+    git push github +refs/remotes/origin/*:refs/heads/* --prune
 
-    echo "Mirror a GitHub (fuerza, podar)"
-    git push --mirror --prune --force github
+    echo "Push tags con prune…"
+    git push github --tags --prune
 
-    echo "Empuje de LFS (si aplica)…"
+    echo "Empuje LFS (si hubiese)…"
     git lfs fetch --all || true
     git lfs push --all github || true
 
-    echo "Mirror terminado: $(GITHUB_OWNER)/$TARGET_REPO"
-  displayName: "Mirror ADO → GitHub (branches, tags, LFS)"
+    echo "Mirror completado: $GITHUB_OWNER/${TARGET_REPO}"
+  displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
   env:
-    GITHUB_USER: $(GITHUB_USER)
+    GITHUB_USER: $(GITHUB_USER)   # definidas en Variables del pipeline (UI)
     GITHUB_PAT:  $(GITHUB_PAT)
-    GITHUB_OWNER: $(GITHUB_OWNER)
