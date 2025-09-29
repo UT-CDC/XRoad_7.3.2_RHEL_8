@@ -1,5 +1,5 @@
 # azure-pipelines.yml
-# Mirror unidireccional: Azure DevOps → GitHub (ramas + tags + LFS)
+# Mirror unidireccional: Azure DevOps → GitHub (ramas + tags + LFS) para cuenta personal
 name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
@@ -17,26 +17,24 @@ pool:
 
 steps:
 - checkout: self
-  persistCredentials: true     # usa System.AccessToken para leer de ADO
-  fetchDepth: 0                # historia completa
+  persistCredentials: true       # usa System.AccessToken para leer de ADO
+  fetchDepth: 0                  # historia completa
 
 - script: |
     set -euo pipefail
 
-    # --- Prechecks & defaults ---
+    # -------- Prechecks & defaults --------
     if [ -z "${GITHUB_USER:-}" ] || [ -z "${GITHUB_PAT:-}" ]; then
-      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (define ambas; PAT como secret)."
+      echo "ERROR: Faltan GITHUB_USER o GITHUB_PAT (defínelas en Variables; PAT como secret)."
       exit 1
     fi
-    # Si no pasan GITHUB_OWNER, usar el mismo usuario (owner = user)
-    if [ -z "${GITHUB_OWNER:-}" ]; then
-      GITHUB_OWNER="$GITHUB_USER"
-    fi
+    # Owner = tu mismo usuario (cuenta personal)
+    OWNER="${GITHUB_OWNER:-$GITHUB_USER}"
 
     echo "Config git"
     git config --global user.name  "ado-mirror-bot"
     git config --global user.email "ado-mirror-bot@example.local"
-    git config --global --add safe.directory "$(Build.SourcesDirectory)"
+    git config --global --add safe.directory "$BUILD_SOURCESDIRECTORY"
 
     echo "Instalar git-lfs (si aplica)…"
     if ! command -v git-lfs >/dev/null 2>&1; then
@@ -45,19 +43,19 @@ steps:
       git lfs install
     fi
 
-    TARGET_REPO="${BUILD_REPOSITORY_NAME}"
-    echo "Repo ADO:    ${BUILD_REPOSITORY_URI}"
-    echo "Repo GitHub: https://github.com/${GITHUB_OWNER}/${TARGET_REPO}.git"
+    TARGET_REPO="$BUILD_REPOSITORY_NAME"
+    echo "Repo ADO:    $BUILD_REPOSITORY_URI"
+    echo "Repo GitHub: https://github.com/$OWNER/$TARGET_REPO.git"
 
     echo "Config remoto GitHub con token…"
     git remote remove github 2>/dev/null || true
-    git remote add github "https://${GITHUB_USER}:${GITHUB_PAT}@github.com/${GITHUB_OWNER}/${TARGET_REPO}.git"
+    git remote add github "https://$GITHUB_USER:$GITHUB_PAT@github.com/$OWNER/$TARGET_REPO.git"
 
     echo "Verificando acceso a GitHub (ls-remote)…"
     if ! git ls-remote github &>/dev/null; then
-      echo "ERROR: Sin acceso al repo GitHub (${GITHUB_OWNER}/${TARGET_REPO})."
-      echo "  - Verifica que ${GITHUB_USER} sea owner o tenga Write."
-      echo "  - PAT válido con 'repo' (o Contents: Read/Write) y SSO habilitado si la org lo exige."
+      echo "ERROR: Sin acceso al repo GitHub ($OWNER/$TARGET_REPO)."
+      echo "  - Asegúrate de que $GITHUB_USER es el dueño (tu cuenta) o tiene Write."
+      echo "  - PAT válido con 'repo' (o Contents: Read/Write)."
       exit 1
     fi
 
@@ -74,9 +72,9 @@ steps:
     git lfs fetch --all || true
     git lfs push --all github || true
 
-    echo "Mirror completado: ${GITHUB_OWNER}/${TARGET_REPO}"
+    echo "✅ Mirror completado: $OWNER/$TARGET_REPO"
   displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
   env:
-    GITHUB_USER: $(GITHUB_USER)     # defínelas en la UI del pipeline
+    GITHUB_USER: $(GITHUB_USER)   # defínelas en la UI del pipeline
     GITHUB_PAT:  $(GITHUB_PAT)
-    GITHUB_OWNER: $(GITHUB_OWNER)   # opcional: si no la defines, el script usa GITHUB_USER
+    # GITHUB_OWNER: (opcional) si lo pones, debe ser igual a tu GITHUB_USER
