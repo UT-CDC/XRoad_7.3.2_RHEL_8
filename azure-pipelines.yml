@@ -1,80 +1,66 @@
 # azure-pipelines.yml
-# Espejo unidireccional: Azure DevOps → GitHub (ramas + tags + LFS)
-# Requisitos:
-#  - Crear en GitHub repos públicos vacíos con el mismo nombre del repo en ADO.
-#  - En el pipeline (Pipelines → Variables), define:
-#       GITHUB_USER = <usuario-personal-con-permisos-en-la-org>
-#       GITHUB_PAT  = <token de ese usuario con permisos de escritura>
-#    (márcalo como secret). Si tu org usa SSO, “Enable SSO” para el PAT.
-#  - Si prefieres Variable Group, puedes usarlo; aquí usamos variables del pipeline.
-
-name: $(Date:yyyyMMdd).$(Rev:r)
 
 trigger:
-  branches:
-    include: ['*']
-  tags:
-    include: ['*']
+  branches: { include: ['*'] }
+  tags:     { include: ['*'] }
 
 schedules:
-- cron: "0 6 * * *"         # 06:00 UTC diario (opcional)
+- cron: "0 6 * * *"         
   displayName: "Daily mirror to GitHub"
-  branches:
-    include: ['*']
+  branches: { include: ['*'] }
   always: true
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  # Cambia si el owner en GitHub no es UT-CDC
-  GITHUB_OWNER: 'UT-CDC'
-  # GITHUB_USER y GITHUB_PAT se definen como variables del pipeline (PAT secreto)
-  # Ej.: en UI → Variables: agrega GITHUB_USER (texto) y GITHUB_PAT (secret)
+- group: github-mirror      # GITHUB_USER, GITHUB_PAT (secret), GITHUB_OWNER (UT-CDC)
 
 steps:
 - checkout: self
-  persistCredentials: true   # Usa System.AccessToken para leer de ADO
-  fetchDepth: 0              # Historia completa
+  persistCredentials: true  
+  fetchDepth: 0           
 
 - script: |
-    set -euo pipefail
+    set -e
 
     echo "Config git"
     git config --global user.name  "ado-mirror-bot"
     git config --global user.email "ado-mirror-bot@example.local"
     git config --global --add safe.directory "$(Build.SourcesDirectory)"
 
-    echo "Instalar git-lfs (si aplica)…"
+    echo "Opcional: git-lfs"
     if ! command -v git-lfs >/dev/null 2>&1; then
       sudo apt-get update -y
       sudo apt-get install -y git-lfs
       git lfs install
     fi
 
-    TARGET_REPO="$(Build.Repository.Name)"
-    echo "Repo ADO:    $(Build.Repository.Uri)"
-    echo "Repo GitHub: https://github.com/$(GITHUB_OWNER)/${TARGET_REPO}.git"
-
-    echo "Config remoto GitHub con token…"
+    echo "Destino GitHub…"
+    TARGET_REPO="$(Build.Repository.Name)"  # mismo nombre en GitHub
     git remote remove github 2>/dev/null || true
     git remote add github "https://$(GITHUB_USER):$(GITHUB_PAT)@github.com/$(GITHUB_OWNER)/${TARGET_REPO}.git"
 
-    echo "Fetch desde origin (ADO)…"
-    git fetch origin --prune --tags
+    echo "Fetch solo del origin (ADO)…"
+    # Trae todas las ramas y tags del origin usando el token del checkout
+    git fetch origin --prune --tags +refs/heads/*:refs/remotes/origin/*
 
-    echo "Push ramas (origin/* → heads/*) con prune y force…"
-    git push github +refs/remotes/origin/*:refs/heads/* --prune
+    echo "Actualizar refs locales (tracking)"
+    # Asegurar refs locales para mirror. Opcional si solo trabajas con remotes/origin/*
+    for r in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin/); do
+      br="${r#origin/}"
+      git update-ref "refs/heads/$br" "refs/remotes/$r" || true
+    done
 
-    echo "Push tags con prune…"
-    git push github --tags --prune
+    echo "Mirror a GitHub (fuerza, podar)"
+    git push --mirror --prune --force github
 
-    echo "Empuje LFS (si hubiese)…"
+    echo "Empuje de LFS (si aplica)…"
     git lfs fetch --all || true
     git lfs push --all github || true
 
-    echo "Mirror completado: $(GITHUB_OWNER)/${TARGET_REPO}"
-  displayName: "Mirror ADO → GitHub (branches & tags & LFS)"
+    echo "Mirror terminado: $(GITHUB_OWNER)/$TARGET_REPO"
+  displayName: "Mirror ADO → GitHub (branches, tags, LFS)"
   env:
     GITHUB_USER: $(GITHUB_USER)
     GITHUB_PAT:  $(GITHUB_PAT)
