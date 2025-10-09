@@ -1,7 +1,7 @@
 #!/bin/bash
 
 
-REPO_URL="https://juanaristizabal@dev.azure.com/juanaristizabal/x-road_colombia_7.3.2_Rhel/_git/x-road_colombia_7.3.2_Rhel"
+REPO_URL="https://github.com/UT-CDC/XRoad_7.3.2_RHEL_8/releases/download/mirror-main-daebc99/rhel.zip"
 CLONE_DIR="x-road_colombia_7.3.2_Rhel"
 DEST_FILE="/opt/rhel.zip"
 
@@ -102,25 +102,39 @@ fi
 echo "--------------------------------------------"
 
 
-if git ls-remote "$REPO_URL" &>/dev/null; then
-  github=200
-  echo "✅ Conexión repositorio X-Road OK"
+#if git ls-remote "$REPO_URL" &>/dev/null; then
+#  github=200
+#  echo "✅ Conexión repositorio X-Road OK"
+#else
+#    github=0
+#  echo "❌  No se tiene acceso al repositorio de X-Road"
+#fi
+#echo "--------------------------------------------"
+
+github=$(wget --inet4-only --spider -S --timeout=5 "$REPO_URL" 2>&1 |grep "HTTP/" | awk '{print $2}' | grep 200)
+if [ "$github" == "200" ]; then
+  echo ""✅ Conexión repositorio X-Road OK""
 else
-    github=0
   echo "❌  No se tiene acceso al repositorio de X-Road"
 fi
 echo "--------------------------------------------"
 
 
 
+
+
 epel=$(curl -s -k -I --connect-timeout 5 https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm | head -n 1 | awk '{print $2}')
-if [ "$epel" == "200" ]; then
+if [ "$epel" == "200" ] || [ "$epel" == "302" ]; then
   echo "✅ Conexión repositorio EPEL  OK"
 else
   echo "❌ No se tiene acceso al repositorio EPEL"
 fi
 echo "--------------------------------------------"
 sleep 2; echo -e "\n"
+
+
+
+
 
 value=("$tln1" "$tln2" "$tln3" "$tln4" "$tln5" "$tln6")
 for i in "${value[@]}"; do
@@ -193,22 +207,12 @@ sleep 2; echo -e "\n"
 # Salir si hay error
 set -e
 
-echo "=== Clonando repositorio ==="
-git clone "$REPO_URL"
+echo "=== Descarga binarios ==="
+wget -P /opt/ "$REPO_URL" 
+echo "✅ Descarga completada...."
 
-echo "=== Moviendo rhel.zip a /opt ==="
-if [ -f "$CLONE_DIR/rhel.zip" ]; then
-    sudo mv "$CLONE_DIR/rhel.zip" "$DEST_FILE"
-    echo "Archivo movido a $DEST_FILE"
-else
-    echo "ERROR: No se encontró $CLONE_DIR/rhel.zip"
-    exit 1
-fi
 
-echo "=== Limpieza ==="
-rm -rf "$CLONE_DIR"
 
-echo "✅ Transferencia completada...."
 
 cd /opt/
 sleep 3
