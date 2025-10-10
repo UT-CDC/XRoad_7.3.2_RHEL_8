@@ -29,7 +29,12 @@ El script valida automáticamente la conectividad a los siguientes servicios:
 ### 1. Descargar el Script
 ```bash
 # Descargar el script de instalación
-wget https://ruta-del-script/xroad732_rhel_8.sh
+git clone https://github.com/UT-CDC/XRoad_7.3.2_RHEL_8
+
+entrar en la carpeta "XRoad_7.3.2_RHEL_8"
+cd XRoad_7.3.2_RHEL_8
+
+adjudicar permisos de ejecución
 chmod +x xroad732_rhel_8.sh
 ```
 
